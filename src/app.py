@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 import aiohttp
+import uvicorn
 import math
 from utils import get_rank, get_username, format_timestamp, get_uuid, get_level_info
 
