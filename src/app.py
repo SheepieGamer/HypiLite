@@ -495,3 +495,5 @@ async def bedwars_stats(uuid: str, api_key: str):
         }
     }
     
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
