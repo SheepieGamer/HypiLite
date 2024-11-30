@@ -22,7 +22,7 @@ A simplified and user-friendly REST API wrapper for the Hypixel API. HypiLite ma
 1. Clone the repository:
 ```bash
 git clone https://github.com/SheepieGamer/hypilite.git
-cd hypilite
+cd hypilite/src
 ```
 
 2. Create and activate a virtual environment:
