@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 import aiohttp
 import math
-from utils import get_rank, get_username, format_timestamp
+from utils import get_rank, get_username, format_timestamp, get_uuid, get_level_info
 
 app = FastAPI(
     docs_url="/swagger_docs",
@@ -27,31 +27,41 @@ async def root():
 async def health_check():
     return {"status": "healthy"}
 
-@app.get("/api/uuid/{username}")
-async def get_uuid(username: str):
-    url = f"https://api.mojang.com/users/profiles/minecraft/{username}"
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status == 204:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Player not found"
-                )
-            elif resp.status != 200:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Mojang API error"
-                )
-            
-            data = await resp.json()
-            return {
-                "success": True,
-                "data": {
-                    "uuid": data.get("id"),
-                    "username": data.get("name")
-                }
+@app.get("/api/uuid/{username_or_uuid}")
+async def get_player_uuid(username_or_uuid: str):
+    count = 1
+    for i in username_or_uuid:
+        count += 1
+    if "-" in username_or_uuid or count > 16:
+        name = await get_username(username_or_uuid)
+        if name == "not found":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Player not found"
+            )
+        return {
+            "success": True,
+            "data": {
+                "uuid": username_or_uuid,
+                "username": name
             }
+        }
+
+    
+    uuid = await get_uuid(username_or_uuid)
+    if uuid == "not found":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Player not found"
+        )
+    
+    return {
+        "success": True,
+        "data": {
+            "uuid": uuid,
+            "username": username_or_uuid
+        }
+    }
 
 @app.get("/api/profile/{uuid}")
 async def get_profile(uuid: str, api_key: str):
@@ -240,3 +250,248 @@ async def get_guild(uuid: str, api_key: str):
         "success": True,
         "data": guild_info
     }
+    
+@app.get("/api/bedwars/{uuid}")
+async def bedwars_stats(uuid: str, api_key: str):
+    uuid = str(uuid).replace("-", "")
+    url = f"https://api.hypixel.net/v2/player?uuid={uuid}"
+    headers = {"API-Key": api_key}
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            data = await resp.json()
+            
+            if resp.status == 401 or data == {"success": False, "cause": "Invalid API key"}:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid API key"
+                )
+            elif resp.status == 422 or data == {"success":False,"cause":"Malformed UUID"}:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Invalid UUID"
+                )
+            elif resp.status != 200:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Hypixel API error"
+                )
+
+    if not data.get("success", False):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Player not found"
+        )
+
+    player_data = data.get("player", {})
+    if not player_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Player data not found"
+        )
+    
+    xp = player_data["stats"]["Bedwars"]["Experience"]
+    level, prestige, xp_to_next_level, progress_percentage = get_level_info(xp)
+    
+    bedwars_data = player_data.get("stats", {}).get("Bedwars", {})
+    if not bedwars_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="BedWars data not found"
+        )
+    
+
+    
+    if bedwars_data.get("slumber", {}).get("bag_type", None) == "MINI_WALLET":
+        slumber_tickets_max = 25
+    elif bedwars_data.get("slumber", {}).get("bag_type", None) == "LIGHT_SLUMBERS_WALLET":
+        slumber_tickets_max = 99
+    elif bedwars_data.get("slumber", {}).get("bag_type", None) == "LIGHT_IMPERIAL_WALLET":
+        slumber_tickets_max = 500
+    elif bedwars_data.get("slumber", {}).get("bag_type", None) == "EXPLORERS_WALLET":
+        slumber_tickets_max = 5_000
+    elif bedwars_data.get("slumber", {}).get("bag_type", None) == "HOTEL_STAFF_WALLET":
+        slumber_tickets_max = 10_000
+    elif bedwars_data.get("slumber", {}).get("bag_type", None) == "PLATINUM_MEMBERSHIP_WALLET":
+        slumber_tickets_max = 100_000
+    elif bedwars_data.get("slumber", {}).get("bag_type", None):
+        slumber_tickets_max = 0
+    
+    # Global tickets and tokens
+    resources = {
+        "tokens": bedwars_data.get("coins", 0),
+        "slumber_tickets": bedwars_data.get("slumber", {}).get("tickets", 0),
+        "slumber_tickets_max": slumber_tickets_max,
+        "slumber_tickets_total": bedwars_data.get("slumber", {}).get("total_tickets_earned", 0),
+    }
+    
+    # Define combined gamemode mappings
+    combined_modes = {
+        "ultimate": ["eight_two_ultimate_", "four_four_ultimate_"],
+        "lucky": ["eight_two_lucky_", "four_four_lucky_"],
+        "rush": ["eight_two_rush_", "four_four_rush_"],
+        "swap": ["eight_two_swap_", "four_four_swap_"]
+    }
+    
+    gamemodes = {
+        "overall": "",                                   # ALl gamemodes
+        "core": None,                                    # Special case: will sum up solo, doubles, threes, fours
+        "eight_one": "eight_one_",                       # Solo
+        "eight_two": "eight_two_",                       # Doubles 
+        "four_three": "four_three_",                     # Threes
+        "four_four": "four_four_",                       # Fours
+        "two_four": "two_four_",                         # 4v4
+        "four_four_armed": "four_four_armed_",           # Fours armed
+        "castle": "castle_",                             # Castle 40v40
+        "four_four_lucky": "four_four_lucky_",           # Fours lucky
+        "eight_two_lucky": "eight_two_lucky_",           # Doubles lucky
+        "eight_two_rush": "eight_two_rush_",             # Doubles rush
+        "four_four_rush": "four_four_rush_",             # Fours rush
+        "eight_two_swap": "eight_two_swap_",             # Doubles swap
+        "four_four_swap": "four_four_swap_",             # Fours swap
+        "eight_two_ultimate": "eight_two_ultimate_",     # Doubles ultimate
+        "four_four_ultimate": "four_four_ultimate_",     # Fours ultimate
+        "four_four_underworld": "four_four_underworld_", # Fours underworld
+        "four_four_voidless": "four_four_voidless_"      # Fours voidless
+    }
+    
+    # Add combined modes to gamemodes dictionary
+    gamemodes.update({
+        "ultimate": None,  # Will combine eight_two_ultimate and four_four_ultimate
+        "lucky": None,     # Will combine eight_two_lucky and four_four_lucky
+        "rush": None,      # Will combine eight_two_rush and four_four_rush
+        "swap": None       # Will combine eight_two_swap and four_four_swap
+    })
+    
+    core_modes = ["eight_one_", "eight_two_", "four_three_", "four_four_"]
+    
+    stats = {}
+    bedwars_data = player_data.get("stats", {}).get("Bedwars", {})
+    
+    for mode_key, mode_prefix in gamemodes.items():
+        if mode_key in combined_modes:
+            # Get stats for combined modes (like ultimate, lucky, etc)
+            prefixes = combined_modes[mode_key]
+            wins = sum(bedwars_data.get(f"{prefix}wins_bedwars", 0) for prefix in prefixes)
+            losses = sum(bedwars_data.get(f"{prefix}losses_bedwars", 0) for prefix in prefixes)
+            final_kills = sum(bedwars_data.get(f"{prefix}final_kills_bedwars", 0) for prefix in prefixes)
+            final_deaths = sum(bedwars_data.get(f"{prefix}final_deaths_bedwars", 0) for prefix in prefixes)
+            kills = sum(bedwars_data.get(f"{prefix}kills_bedwars", 0) for prefix in prefixes)
+            deaths = sum(bedwars_data.get(f"{prefix}deaths_bedwars", 0) for prefix in prefixes)
+            beds_broken = sum(bedwars_data.get(f"{prefix}beds_broken_bedwars", 0) for prefix in prefixes)
+            beds_lost = sum(bedwars_data.get(f"{prefix}beds_lost_bedwars", 0) for prefix in prefixes)
+            
+            mode_stats = {
+                # Resources
+                f"{mode_key}_emeralds": sum(bedwars_data.get(f"{prefix}emerald_resources_collected_bedwars", 0) for prefix in prefixes),
+                f"{mode_key}_diamonds": sum(bedwars_data.get(f"{prefix}diamond_resources_collected_bedwars", 0) for prefix in prefixes),
+                f"{mode_key}_gold": sum(bedwars_data.get(f"{prefix}gold_resources_collected_bedwars", 0) for prefix in prefixes),
+                f"{mode_key}_iron": sum(bedwars_data.get(f"{prefix}iron_resources_collected_bedwars", 0) for prefix in prefixes),
+                
+                # Standard stats
+                f"{mode_key}_wins": wins,
+                f"{mode_key}_losses": losses,
+                f"{mode_key}_final_kills": final_kills,
+                f"{mode_key}_final_deaths": final_deaths,
+                f"{mode_key}_kills": kills,
+                f"{mode_key}_deaths": deaths,
+                f"{mode_key}_beds_broken": beds_broken,
+                f"{mode_key}_beds_lost": beds_lost,
+                
+                # Ratios
+                f"{mode_key}_wlr": round(wins / losses if losses > 0 else wins, 2),
+                f"{mode_key}_kdr": round(kills / deaths if deaths > 0 else kills, 2),
+                f"{mode_key}_fkdr": round(final_kills / final_deaths if final_deaths > 0 else final_kills, 2),
+                f"{mode_key}_bblr": round(beds_broken / beds_lost if beds_lost > 0 else beds_broken, 2)
+            }
+        elif mode_key == "core":
+            # Get stats for core modes
+            wins = sum(bedwars_data.get(f"{prefix}wins_bedwars", 0) for prefix in core_modes)
+            losses = sum(bedwars_data.get(f"{prefix}losses_bedwars", 0) for prefix in core_modes)
+            final_kills = sum(bedwars_data.get(f"{prefix}final_kills_bedwars", 0) for prefix in core_modes)
+            final_deaths = sum(bedwars_data.get(f"{prefix}final_deaths_bedwars", 0) for prefix in core_modes)
+            kills = sum(bedwars_data.get(f"{prefix}kills_bedwars", 0) for prefix in core_modes)
+            deaths = sum(bedwars_data.get(f"{prefix}deaths_bedwars", 0) for prefix in core_modes)
+            beds_broken = sum(bedwars_data.get(f"{prefix}beds_broken_bedwars", 0) for prefix in core_modes)
+            beds_lost = sum(bedwars_data.get(f"{prefix}beds_lost_bedwars", 0) for prefix in core_modes)
+            
+            mode_stats = {
+                # Resources
+                f"{mode_key}_emeralds": sum(bedwars_data.get(f"{prefix}emerald_resources_collected_bedwars", 0) for prefix in core_modes),
+                f"{mode_key}_diamonds": sum(bedwars_data.get(f"{prefix}diamond_resources_collected_bedwars", 0) for prefix in core_modes),
+                f"{mode_key}_gold": sum(bedwars_data.get(f"{prefix}gold_resources_collected_bedwars", 0) for prefix in core_modes),
+                f"{mode_key}_iron": sum(bedwars_data.get(f"{prefix}iron_resources_collected_bedwars", 0) for prefix in core_modes),
+                
+                # Standard stats
+                f"{mode_key}_wins": wins,
+                f"{mode_key}_losses": losses,
+                f"{mode_key}_final_kills": final_kills,
+                f"{mode_key}_final_deaths": final_deaths,
+                f"{mode_key}_kills": kills,
+                f"{mode_key}_deaths": deaths,
+                f"{mode_key}_beds_broken": beds_broken,
+                f"{mode_key}_beds_lost": beds_lost,
+                
+                # Ratios
+                f"{mode_key}_wlr": round(wins / losses if losses > 0 else wins, 2),
+                f"{mode_key}_kdr": round(kills / deaths if deaths > 0 else kills, 2),
+                f"{mode_key}_fkdr": round(final_kills / final_deaths if final_deaths > 0 else final_kills, 2),
+                f"{mode_key}_bblr": round(beds_broken / beds_lost if beds_lost > 0 else beds_broken, 2)
+            }
+        else:
+            # Get stats for individual mode
+            wins = bedwars_data.get(f"{mode_prefix}wins_bedwars", 0)
+            losses = bedwars_data.get(f"{mode_prefix}losses_bedwars", 0)
+            final_kills = bedwars_data.get(f"{mode_prefix}final_kills_bedwars", 0)
+            final_deaths = bedwars_data.get(f"{mode_prefix}final_deaths_bedwars", 0)
+            kills = bedwars_data.get(f"{mode_prefix}kills_bedwars", 0)
+            deaths = bedwars_data.get(f"{mode_prefix}deaths_bedwars", 0)
+            beds_broken = bedwars_data.get(f"{mode_prefix}beds_broken_bedwars", 0)
+            beds_lost = bedwars_data.get(f"{mode_prefix}beds_lost_bedwars", 0)
+            
+            mode_stats = {
+                # Resources
+                f"{mode_key}_emeralds": bedwars_data.get(f"{mode_prefix}emerald_resources_collected_bedwars", 0),
+                f"{mode_key}_diamonds": bedwars_data.get(f"{mode_prefix}diamond_resources_collected_bedwars", 0),
+                f"{mode_key}_gold": bedwars_data.get(f"{mode_prefix}gold_resources_collected_bedwars", 0),
+                f"{mode_key}_iron": bedwars_data.get(f"{mode_prefix}iron_resources_collected_bedwars", 0),
+                
+                # Standard stats
+                f"{mode_key}_wins": wins,
+                f"{mode_key}_losses": losses,
+                f"{mode_key}_final_kills": final_kills,
+                f"{mode_key}_final_deaths": final_deaths,
+                f"{mode_key}_kills": kills,
+                f"{mode_key}_deaths": deaths,
+                f"{mode_key}_beds_broken": beds_broken,
+                f"{mode_key}_beds_lost": beds_lost,
+                
+                # Ratios
+                f"{mode_key}_wlr": round(wins / losses if losses > 0 else wins, 2),
+                f"{mode_key}_kdr": round(kills / deaths if deaths > 0 else kills, 2),
+                f"{mode_key}_fkdr": round(final_kills / final_deaths if final_deaths > 0 else final_kills, 2),
+                f"{mode_key}_bblr": round(beds_broken / beds_lost if beds_lost > 0 else beds_broken, 2)
+            }
+        stats[mode_key] = mode_stats
+    
+    try:
+        next_level = int(str(level).split(".")[0]) + 1
+    except KeyError:
+        next_level = level + 1
+        
+    return {
+        "success": True,
+        "data": {
+            "uuid": uuid,
+            "username": player_data.get("displayname", "not found"),
+            "xp": xp,
+            "level": level,
+            "prestige": prestige,
+            "next_level": next_level,
+            "xp_to_next_level": xp_to_next_level,
+            "progress_to_next_level_percentage": progress_percentage,
+            "resources": resources,
+            "stats": stats
+        }
+    }
+    
