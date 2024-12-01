@@ -1,6 +1,13 @@
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+from models.responses import (
+    PlayerUUIDResponse,
+    GuildResponse,
+    PlayerProfileResponse,
+    BedwarsResponse,
+    ErrorResponse
+)
 import aiohttp
 import uvicorn
 import math
@@ -28,7 +35,7 @@ async def root():
 async def health_check():
     return {"status": "healthy"}
 
-@app.get("/api/uuid/{username_or_uuid}")
+@app.get("/api/uuid/{username_or_uuid}", response_model=PlayerUUIDResponse, responses={404: {"model": ErrorResponse}})
 async def get_player_uuid(username_or_uuid: str):
     count = 1
     for i in username_or_uuid:
@@ -64,7 +71,7 @@ async def get_player_uuid(username_or_uuid: str):
         }
     }
 
-@app.get("/api/profile/{uuid}")
+@app.get("/api/profile/{uuid}", response_model=PlayerProfileResponse, responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}, 500: {"model": ErrorResponse}})
 async def get_profile(uuid: str, api_key: str):
     uuid = str(uuid).replace("-", "")
     url = f"https://api.hypixel.net/v2/player?uuid={uuid}"
@@ -144,7 +151,7 @@ async def get_profile(uuid: str, api_key: str):
         }
     }
 
-@app.get("/api/guild/{uuid}")
+@app.get("/api/guild/{uuid}", response_model=GuildResponse, responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}, 500: {"model": ErrorResponse}})
 async def get_guild(uuid: str, api_key: str):
     uuid = str(uuid).replace("-", "")
     url = f"https://api.hypixel.net/v2/guild?player={uuid}"
@@ -252,7 +259,7 @@ async def get_guild(uuid: str, api_key: str):
         "data": guild_info
     }
     
-@app.get("/api/bedwars/{uuid}")
+@app.get("/api/bedwars/{uuid}", response_model=BedwarsResponse, responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}, 500: {"model": ErrorResponse}})
 async def bedwars_stats(uuid: str, api_key: str):
     uuid = str(uuid).replace("-", "")
     url = f"https://api.hypixel.net/v2/player?uuid={uuid}"
